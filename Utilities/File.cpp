@@ -28,6 +28,37 @@ std::string g_android_cache_dir;
 #include <Windows.h>
 #include <winioctl.h>
 
+/**
+ * @brief Trims trailing path delimiters (slashes/backslashes) in-place from a wide path string,
+ * while safely preserving root paths (such as C:\, \\?\C:\, or UNC share roots).
+ *
+ * @param path Pointer to null-terminated wchar_t path buffer to trim.
+ */
+static void trim_trailing_path_separators(wchar_t* path)
+{
+	if (!path)
+	{
+		return;
+	}
+
+	usz len = std::wcslen(path);
+	while (len > 0 && (path[len - 1] == L'/' || path[len - 1] == L'\\'))
+	{
+		if (len >= 2 && path[len - 2] == L':')
+		{
+			break;
+		}
+
+		if (len == 1)
+		{
+			break;
+		}
+
+		path[len - 1] = L'\0';
+		len--;
+	}
+}
+
 static std::unique_ptr<wchar_t[]> to_wchar(std::string_view source)
 {
 	// String size + null terminator
@@ -130,6 +161,7 @@ static fs::error to_error(DWORD e)
 	case ERROR_DIRECTORY: return fs::error::inval;
 	case ERROR_INVALID_NAME: return fs::error::inval;
 	case ERROR_INVALID_FUNCTION: return fs::error::inval;
+	case ERROR_INVALID_PARAMETER: return fs::error::inval;
 	case ERROR_SHARING_VIOLATION: return fs::error::acces;
 	case ERROR_DIR_NOT_EMPTY: return fs::error::notempty;
 	case ERROR_NOT_READY: return fs::error::noent;
@@ -1614,12 +1646,16 @@ bool fs::rename(const std::string& from, const std::string& to, bool overwrite)
 	const auto ws1 = to_wchar(from);
 	const auto ws2 = to_wchar(to);
 
+	trim_trailing_path_separators(ws1.get());
+	trim_trailing_path_separators(ws2.get());
+
 	if (!MoveFileExW(ws1.get(), ws2.get(), overwrite ? MOVEFILE_REPLACE_EXISTING : 0))
 	{
 		DWORD error1 = GetLastError();
 
 		if (overwrite && error1 == ERROR_ACCESS_DENIED && is_dir(from) && is_dir(to))
 		{
+			SetFileAttributesW(ws2.get(), FILE_ATTRIBUTE_NORMAL);
 			if (RemoveDirectoryW(ws2.get()))
 			{
 				if (MoveFileW(ws1.get(), ws2.get()))

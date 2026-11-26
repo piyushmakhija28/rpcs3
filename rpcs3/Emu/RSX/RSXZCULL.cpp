@@ -932,12 +932,26 @@ namespace rsx
 			return bytes_to_write;
 		}
 
+		/**
+		 * @brief Handles enqueuing of a ZCULL occlusion report write task.
+		 * Locks the memory page containing the sink address to RW protection (PROT_NONE)
+		 * to detect CPU read/write hazards, or tracks report in flight when optimizations are disabled.
+		 *
+		 * @param address Virtual memory address of the report sink buffer.
+		 */
 		void ZCULL_control::on_report_enqueued(vm::addr_t address)
 		{
 			const auto location = rsx::classify_location(address);
+
+			if (m_pages_accessed[location].load())
+			{
+				m_critical_reports_in_flight++;
+				return;
+			}
+
 			std::scoped_lock lock(m_pages_mutex);
 
-			if (!m_pages_accessed[location]) [[ likely ]]
+			if (!m_pages_accessed[location].observe()) [[ likely ]]
 			{
 				const auto page_address = utils::page_start(static_cast<u32>(address));
 				auto& page = m_locked_pages[location][page_address];
@@ -955,35 +969,54 @@ namespace rsx
 			}
 		}
 
+		/**
+		 * @brief Handles completion and retirement of a ZCULL occlusion report.
+		 * Decrements page ref-count if optimizations are active, or decrements
+		 * m_critical_reports_in_flight if optimizations were disabled.
+		 *
+		 * @param address Virtual memory address of the completed report sink.
+		 */
 		void ZCULL_control::on_report_completed(vm::addr_t address)
 		{
 			const auto location = rsx::classify_location(address);
-			if (!m_pages_accessed[location])
-			{
-				const auto page_address = utils::page_start(static_cast<u32>(address));
-				std::scoped_lock lock(m_pages_mutex);
 
+			if (m_pages_accessed[location].load())
+			{
+				m_critical_reports_in_flight--;
+				return;
+			}
+
+			const auto page_address = utils::page_start(static_cast<u32>(address));
+			std::scoped_lock lock(m_pages_mutex);
+
+			if (!m_pages_accessed[location].observe())
+			{
 				if (auto found = m_locked_pages[location].find(page_address);
 					found != m_locked_pages[location].end())
 				{
 					auto& page = found->second;
-
 					ensure(page.has_refs());
 					page.release();
 				}
+				return;
 			}
 
-			if (m_pages_accessed[location])
-			{
-				m_critical_reports_in_flight--;
-			}
+			// Optimizations were disabled concurrently: in-flight ref was converted to m_critical_reports_in_flight
+			m_critical_reports_in_flight--;
 		}
 
+		/**
+		 * @brief Disables ZCULL optimization for a memory location (local or host memory).
+		 * Unlocks all protected memory pages back to RW, converts active references to
+		 * in-flight critical report counters, and permanently publishes disabled status.
+		 *
+		 * @param thr Active RSX rendering thread context.
+		 * @param location RSX memory location identifier (local memory or main memory).
+		 */
 		void ZCULL_control::disable_optimizations(::rsx::thread*, u32 location)
 		{
 			// Externally synchronized
 			rsx_log.warning("Reports area at location %s was accessed. ZCULL optimizations will be disabled.", location_tostring(location));
-			m_pages_accessed[location] = true;
 
 			// Unlock pages
 			for (auto& p : m_locked_pages[location])
@@ -1005,14 +1038,24 @@ namespace rsx
 			}
 
 			m_locked_pages[location].clear();
+			// Publish accessed flag only after all pages are unprotected to prevent premature access violations
+			m_pages_accessed[location].release(true);
 		}
 
+		/**
+		 * @brief Handles memory access violations triggered when CPU accesses protected ZCULL report buffers.
+		 * Acquires exclusive access, checks page fault state, safely dispatches optimization disabling
+		 * while coordinating RSX pipeline flush to avoid deadlocks.
+		 *
+		 * @param address Faulting virtual memory address.
+		 * @return True if the access violation was handled and instruction can retry; false if unrelated fault.
+		 */
 		bool ZCULL_control::on_access_violation(u32 address)
 		{
 			const auto page_address = utils::page_start(address);
 			const auto location = rsx::classify_location(address);
 
-			if (m_pages_accessed[location])
+			if (m_pages_accessed[location].load())
 			{
 				// Already faulted, no locks possible
 				return false;
@@ -1020,27 +1063,24 @@ namespace rsx
 
 			bool need_disable_optimizations = false;
 			{
-				reader_lock lock(m_pages_mutex);
+				std::scoped_lock lock(m_pages_mutex);
 
 				if (auto found = m_locked_pages[location].find(page_address);
 					found != m_locked_pages[location].end())
 				{
-					lock.upgrade();
-
-					auto& fault_page = m_locked_pages[location][page_address];
+					auto& fault_page = found->second;
 					if (fault_page.prot != utils::protection::rw)
 					{
 						if (fault_page.has_refs())
 						{
-							// R/W to active block
-							need_disable_optimizations = true;    // Defer actual operation
-							m_pages_accessed[location] = true;
+							// Defer actual disable until eng_lock is acquired to avoid lock-order inversion
+							need_disable_optimizations = true;
 						}
 						else
 						{
 							// R/W to stale block, unload it and move on
 							utils::memory_protect(vm::base(page_address), utils::get_page_size(), utils::protection::rw);
-							m_locked_pages[location].erase(page_address);
+							m_locked_pages[location].erase(found);
 
 							return true;
 						}
@@ -1054,9 +1094,13 @@ namespace rsx
 				auto thr = rsx::get_current_renderer();
 				rsx::eng_lock rlock(thr);
 				std::scoped_lock lock(m_pages_mutex);
-				disable_optimizations(thr, location);
 
-				thr->eng_interrupt_mask |= rsx::pipe_flush_interrupt;
+				if (!m_pages_accessed[location].observe())
+				{
+					disable_optimizations(thr, location);
+					thr->eng_interrupt_mask |= rsx::pipe_flush_interrupt;
+				}
+
 				return true;
 			}
 

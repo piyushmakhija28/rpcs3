@@ -1038,10 +1038,25 @@ std::string vfs::host::hash_path(const std::string& path, const std::string& dev
 	return fmt::format(u8"%s/＄%s%s%s", dev_root, fmt::base57(std::hash<std::string>()(path)), prefix, fmt::base57(utils::get_unique_tsc()));
 }
 
+/**
+ * @brief Atomically renames a file or directory across virtual mount boundaries.
+ * Closes and restores open guest file handles if locking/sharing violations occur,
+ * normalizing trailing path delimiters to ensure compatibility across host filesystems.
+ *
+ * @param from Source virtual path.
+ * @param to Target destination virtual path.
+ * @param mp Mount point owning the filesystem entry.
+ * @param overwrite Whether to replace an existing target file/directory.
+ * @param lock Whether to acquire mount point mutex.
+ * @return True if rename succeeded; false otherwise.
+ */
 bool vfs::host::rename(const std::string& from, const std::string& to, const lv2_fs_mount_point* mp, bool overwrite, bool lock)
 {
 	// Lock mount point, close file descriptors, retry
 	const auto from0 = std::string_view(from).substr(0, from.find_last_not_of(fs::delim) + 1);
+	const auto to0 = std::string_view(to).substr(0, to.find_last_not_of(fs::delim) + 1);
+	const std::string s_from0(from0);
+	const std::string s_to0(to0);
 
 	std::vector<std::pair<shared_ptr<lv2_file>, std::string>> escaped_real;
 
@@ -1052,7 +1067,7 @@ bool vfs::host::rename(const std::string& from, const std::string& to, const lv2
 		mp_lock.lock();
 	}
 
-	if (fs::rename(from, to, overwrite))
+	if (fs::rename(s_from0, s_to0, overwrite))
 	{
 		return true;
 	}
@@ -1062,11 +1077,11 @@ bool vfs::host::rename(const std::string& from, const std::string& to, const lv2
 		return false;
 	}
 
-	const auto escaped_from = g_emu_callbacks.resolve_path(from);
+	const auto escaped_from = g_emu_callbacks.resolve_path(s_from0);
 
 	auto check_path = [&](std::string_view path)
 	{
-		return path.starts_with(from) && (path.size() == from.size() || path[from.size()] == fs::delim[0] || path[from.size()] == fs::delim[1]);
+		return path.starts_with(escaped_from) && (path.size() == escaped_from.size() || path[escaped_from.size()] == fs::delim[0] || path[escaped_from.size()] == fs::delim[1]);
 	};
 
 	idm::select<lv2_fs_object, lv2_file>([&](u32 id, lv2_file& file)
@@ -1100,7 +1115,7 @@ bool vfs::host::rename(const std::string& from, const std::string& to, const lv2
 
 	for (;; std::this_thread::yield())
 	{
-		if (fs::rename(from, to, overwrite))
+		if (fs::rename(s_from0, s_to0, overwrite))
 		{
 			res = true;
 			break;
@@ -1132,7 +1147,17 @@ bool vfs::host::rename(const std::string& from, const std::string& to, const lv2
 			// Update internal path
 			if (res)
 			{
-				file.real_path = to + (real_path != escaped_from ? '/' + file.real_path.substr(from0.size()) : ""s);
+				std::string rel_path;
+				if (real_path != escaped_from)
+				{
+					std::string_view sub = std::string_view(file.real_path).substr(from0.size());
+					if (const auto pos = sub.find_first_not_of(fs::delim); pos != std::string_view::npos)
+					{
+						sub.remove_prefix(pos);
+					}
+					rel_path = fmt::format("/%s", sub);
+				}
+				file.real_path = fmt::format("%s%s", to0, rel_path);
 			}
 
 			// Reopen with ignored TRUNC, APPEND, CREATE and EXCL flags

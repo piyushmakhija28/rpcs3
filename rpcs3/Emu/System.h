@@ -326,6 +326,16 @@ public:
 		return m_db_config ? *m_db_config : empty_db_config;
 	}
 
+	cfg_mode GetConfigMode() const
+	{
+		return m_config_mode;
+	}
+
+	const std::optional<std::string>& GetDbConfig() const
+	{
+		return m_db_config;
+	}
+
 	bool IsChildProcess() const
 	{
 		return m_config_mode == cfg_mode::continuous;

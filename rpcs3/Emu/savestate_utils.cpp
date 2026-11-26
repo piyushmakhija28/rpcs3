@@ -479,6 +479,15 @@ std::vector<version_entry> read_used_savestate_versions()
 	return used_serial;
 }
 
+/**
+ * @brief Boots the current game from a numbered savestate slot or tests savestate presence.
+ * Preserves continuous mode, custom configuration, and Title ID metadata to prevent crashes
+ * when games are launched via desktop shortcuts or external launchers.
+ *
+ * @param testing If true, only probes whether the savestate file exists without shutting down.
+ * @param index 1-based savestate slot index.
+ * @return True if savestate exists (testing) or successfully booted; false otherwise.
+ */
 bool boot_current_game_savestate(bool testing, u32 index)
 {
 	if (index == 0 || index > g_cfg.savestate.max_files.get())
@@ -502,11 +511,15 @@ bool boot_current_game_savestate(bool testing, u32 index)
 		{
 			sys_log.success("Booting the most recent savestate \'%s\' using the Reload shortcut.", savestate_path);
 
+			const std::string title_id = Emu.GetTitleID();
+			const std::string config_path = Emu.GetUsedConfig();
+			const auto db_config = Emu.GetDbConfig();
+
 			// Make sure we keep the game window opened
 			Emu.SetContinuousMode(true);
 			Emu.GracefulShutdown(false, false, false, true);
 
-			if (game_boot_result error = Emu.BootGame(savestate_path, "", true); error != game_boot_result::no_errors)
+			if (game_boot_result error = Emu.BootGame(savestate_path, title_id, true, cfg_mode::continuous, config_path, db_config); error != game_boot_result::no_errors)
 			{
 				sys_log.error("Failed to boot savestate \'%s\' using the Reload shortcut. (error: %s)", savestate_path, error);
 			}

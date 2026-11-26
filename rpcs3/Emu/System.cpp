@@ -1399,6 +1399,14 @@ game_boot_result Emulator::Load(const std::string& title_id, bool is_disc_patch,
 						disc = std::move(game_path);
 					}
 				}
+				else if (const std::string hdd_disc = rpcs3::utils::get_hdd0_dir() + "disc/" + m_title_id; fs::is_dir(hdd_disc))
+				{
+					disc = hdd_disc;
+				}
+				else if (const std::string hdd_game = rpcs3::utils::get_hdd0_dir() + "game/" + m_title_id + "/PS3_GAME"; fs::is_dir(hdd_game))
+				{
+					disc = rpcs3::utils::get_hdd0_dir() + "game/" + m_title_id;
+				}
 				else if (!g_cfg.savestate.state_inspection_mode)
 				{
 					sys_log.fatal("Disc directory not found. Savestate cannot be loaded. ('%s')", m_title_id);

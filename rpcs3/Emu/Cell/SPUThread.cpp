@@ -2322,11 +2322,33 @@ void spu_thread::do_dma_transfer(spu_thread* _this, const spu_mfc_cmd& args, u8*
 				}
 				case 4:
 				{
+					if (!is_get)
+					{
+						atomic_fence_release();
+
+						if ((reinterpret_cast<uintptr_t>(dst0) & 0x3) == 0) [[likely]]
+						{
+							reinterpret_cast<atomic_t<u32>*>(dst0)->release(*reinterpret_cast<const u32*>(src));
+							break;
+						}
+					}
+
 					*reinterpret_cast<u32*>(dst0) = *reinterpret_cast<const u32*>(src);
 					break;
 				}
 				case 8:
 				{
+					if (!is_get)
+					{
+						atomic_fence_release();
+
+						if ((reinterpret_cast<uintptr_t>(dst0) & 0x7) == 0) [[likely]]
+						{
+							reinterpret_cast<atomic_t<u64>*>(dst0)->release(*reinterpret_cast<const u64*>(src));
+							break;
+						}
+					}
+
 					*reinterpret_cast<u64*>(dst0) = *reinterpret_cast<const u64*>(src);
 					break;
 				}
@@ -3382,12 +3404,30 @@ bool spu_thread::do_list_transfer(spu_mfc_cmd& args)
 			}
 			case 4:
 			{
-				*reinterpret_cast<u32*>(dst) = *reinterpret_cast<const u32*>(src);
+				atomic_fence_release();
+
+				if ((reinterpret_cast<uintptr_t>(dst) & 0x3) == 0) [[likely]]
+				{
+					reinterpret_cast<atomic_t<u32>*>(dst)->release(*reinterpret_cast<const u32*>(src));
+				}
+				else
+				{
+					*reinterpret_cast<u32*>(dst) = *reinterpret_cast<const u32*>(src);
+				}
 				break;
 			}
 			case 8:
 			{
-				*reinterpret_cast<u64*>(dst) = *reinterpret_cast<const u64*>(src);
+				atomic_fence_release();
+
+				if ((reinterpret_cast<uintptr_t>(dst) & 0x7) == 0) [[likely]]
+				{
+					reinterpret_cast<atomic_t<u64>*>(dst)->release(*reinterpret_cast<const u64*>(src));
+				}
+				else
+				{
+					*reinterpret_cast<u64*>(dst) = *reinterpret_cast<const u64*>(src);
+				}
 				break;
 			}
 			default:
